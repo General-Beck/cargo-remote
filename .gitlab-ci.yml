@@ -1,7 +1,7 @@
 stages:
   - audit
   - build
-image:                             ${REGISTRY}/parity-ci-linux:latest
+image:                             rust:latest
 
 variables:
   GIT_STRATEGY:                    fetch
