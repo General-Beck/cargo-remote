@@ -5,6 +5,8 @@ use toml::Value;
 
 use log::{error, info, warn};
 
+const PROGRESS_FLAG: &str = "--info=progress2";
+
 #[derive(StructOpt, Debug)]
 #[structopt(name = "cargo-remote", bin_name = "cargo")]
 enum Opts {
@@ -40,9 +42,15 @@ enum Opts {
         #[structopt(
             short = "c",
             long = "copy-back",
-            help = "Transfer the target folder back to the local machine"
+            help = "Transfer the target folder or specific file from that folder back to the local machine"
         )]
-        copy_back: bool,
+        copy_back: Option<Option<String>>,
+
+        #[structopt(
+            long = "no-copy-lock",
+            help = "don't transfer the Cargo.lock file back to the local machine"
+        )]
+        no_copy_lock: bool,
 
         #[structopt(
             long = "manifest-path",
@@ -106,6 +114,7 @@ fn main() {
         rustup_default,
         env,
         copy_back,
+        no_copy_lock,
         manifest_path,
         hidden,
         command,
@@ -120,17 +129,17 @@ fn main() {
     info!("Project dir: {:?}", project_dir);
     let mut manifest_path = project_dir.clone();
     manifest_path.push("Cargo.toml");
-    let project_name = project_dir;
-//        .packages
-//       .iter()
-//        .find(|p| p.manifest_path == manifest_path)
-//        .map_or_else(
-//            || {
-//                info!("No metadata found. Use project dir name for remote");
-//                |p| p.name == project_dir;
-//            },
-//            |p| &p.name,
-//        );
+    let project_name = project_metadata
+        .packages
+        .iter()
+        .find(|p| p.manifest_path == manifest_path)
+        .map_or_else(
+            || {
+                info!("No metadata found. Setting the remote dir name like the local. Or use --manifest_path for execute");
+                project_dir.file_name().and_then(|x| x.to_str()).unwrap()
+            },
+            |p| &p.name,
+        );
     info!("Project name: {:?}", project_name);
     let configs = vec![
         config_from_file(&project_dir.join(".cargo-remote.toml")),
@@ -197,8 +206,7 @@ fn main() {
     );
 
     info!("Starting build process.");
-    Command::new("ssh")
-        //.arg("-t")
+    let output = Command::new("ssh")
         .arg(&build_server)
         .arg(build_command)
         .stdout(Stdio::inherit())
@@ -210,15 +218,16 @@ fn main() {
             exit(-5);
         });
 
-    if copy_back {
+    if let Some(file_name) = copy_back {
         info!("Transferring artifacts back to client.");
+        let file_name = file_name.unwrap_or_else(String::new);
         Command::new("rsync")
             .arg("-a")
             .arg("--delete")
             .arg("--compress")
             .arg("--info=progress2")
-            .arg(format!("{}:{}/target/", build_server, build_path))
-            .arg(format!("{}/target/", project_dir.to_string_lossy()))
+            .arg(format!("{}:{}/target/{}", build_server, build_path, file_name))
+            .arg(format!("{}/target/{}", project_dir.to_string_lossy(), file_name))
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .stdin(Stdio::inherit())
@@ -230,5 +239,31 @@ fn main() {
                 );
                 exit(-6);
             });
+    }
+
+    if !no_copy_lock {
+        info!("Transferring Cargo.lock file back to client.");
+        Command::new("rsync")
+            .arg("-a")
+            .arg("--delete")
+            .arg("--compress")
+            .arg("--info=progress2")
+            .arg(format!("{}:{}/Cargo.lock", build_server, build_path))
+            .arg(format!("{}/Cargo.lock", project_dir.to_string_lossy()))
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .stdin(Stdio::inherit())
+            .output()
+            .unwrap_or_else(|e| {
+                error!(
+                    "Failed to transfer Cargo.lock back to local machine (error: {})",
+                    e
+                );
+                exit(-7);
+            });
+    }
+
+    if !output.status.success() {
+        exit(output.status.code().unwrap_or(1))
     }
 }
